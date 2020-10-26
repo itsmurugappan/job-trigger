@@ -15,7 +15,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: default-rb
-  namespace: <ns-name>
+  namespace: demo
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -23,30 +23,31 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: default
-  namespace: <ns-name>
+  namespace: demo
 EOF
 ```
 
 ### Creating and Running the service
 
-This knative service looks for the job spec in a environment variable named `spec`.
+This knative service looks for the job spec in a environment variable named `JOB_SPEC`.
 Below is an example of a service specification
 
 ```
 kubectl apply -f - <<EOF
-apiVersion: serving.knative.dev/v1alpha1
+apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
   name: sample-job-trigger-svc
+  namespace: demo
 spec:
   template:
     spec:
       containers:
       - env:
-        - name: spec
-          value: "{\"Image\": \"murugappans/goswaggertest\",\"Name\": \"sample-job\"}"
-        image: ko://github.com/itsmurugappan/job-trigger/cmd/job-trigger
-EOF     
+        - name: JOB_SPEC
+          value: "{\"Image\": \"murugappans/hw\",\"Name\": \"sample-job\"}"
+        image: murugappans/job-trigger:v1
+EOF
 ```
 
 ### Configuring your Job
@@ -54,29 +55,29 @@ EOF
 #### CMD
 
 ```
-  "Name": "spec",
-  "Value": "{\"Image\": \"murugappans/goswaggertest\",\"Name\": \"simplego\",\"User\": 1002, \"Cmd\": [\"python\", \"job.py\"]}"
+  "Name": "JOB_SPEC",
+  "Value": "{\"Image\": \"murugappans/hw\",\"Name\": \"simplepy\",\"User\": 1002, \"Cmd\": [\"python\", \"job.py\"]}"
 ```
 
 #### Environment Variables
 
 ```
-  "Name": "spec",
-  "Value": "{\"Image\": \"murugappans/goswaggertest\",\"Name\": \"simplego\",\"User\": 1002, \"EnvVariables\": [\"Name\": \"env\",\"Value\": \"prod\"}]}"
+  "Name": "JOB_SPEC",
+  "Value": "{\"Image\": \"murugappans/hw\",\"Name\": \"simplego\",\"User\": 1002, \"EnvVariables\": [\"Name\": \"env\",\"Value\": \"prod\"}]}"
 ```
 
 #### CM and Secret volumes 
 
 ```
-  "Name": "spec",
-  "Value": "{\"Image\": \"murugappans/goswaggertest\",\"Name\": \"simplego\",\"User\": 1002, \"Secrets\": [{\"Name\": \"secretname\",\"MountPath\": \"pathtomount\"}],\"ConfigMaps\": [{\"Name\": \"cmname\",\"MountPath\": \"pathtomount\"}]}"
+  "Name": "JOB_SPEC",
+  "Value": "{\"Image\": \"murugappans/hw\",\"Name\": \"simplego\",\"User\": 1002, \"Secrets\": [{\"Name\": \"secretname\",\"MountPath\": \"pathtomount\"}],\"ConfigMaps\": [{\"Name\": \"cmname\",\"MountPath\": \"pathtomount\"}]}"
 ```
 
 ####  CM and Secret as env variables
 
 ```
-  "Name": "spec",
-  "Value": "{\"Image\": \"murugappans/goswaggertest\",\"Name\": \"simplego\",\"User\": 1002, \"EnvFromSecretorCM\": [{\"Name\": \"secretname\",\"Type\": \"Secret\"}]}"
+  "Name": "JOB_SPEC",
+  "Value": "{\"Image\": \"murugappans/hw\",\"Name\": \"simplego\",\"User\": 1002, \"EnvFromSecretorCM\": [{\"Name\": \"secretname\",\"Type\": \"Secret\"}]}"
 ```
 
 

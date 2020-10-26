@@ -1,59 +1,95 @@
 package function
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"log"
-	"sort"
+	"net/http"
+	"os"
+	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/go-chi/chi"
+	"github.com/go-chi/render"
 
 	"github.com/google/uuid"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	typedbatchv1 "k8s.io/client-go/kubernetes/typed/batch/v1"
-	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	logging "knative.dev/pkg/logging"
 
-	types "github.com/itsmurugappan/kubernetes-resource-builder/pkg/kubernetes"
+	"github.com/itsmurugappan/kubernetes-resource-builder/pkg/knative"
+	"github.com/itsmurugappan/kubernetes-resource-builder/pkg/kubernetes"
 	pkgbatchv1 "github.com/itsmurugappan/kubernetes-resource-builder/pkg/kubernetes/batchv1"
 	pkgcorev1 "github.com/itsmurugappan/kubernetes-resource-builder/pkg/kubernetes/corev1"
 )
 
-//CreateJob construct a job and creates in the same namespace as the knative service
-func CreateJob(spec types.ContainerSpec, ns string, queryParams map[string][]string,
-	typedcorev1 typedcorev1.CoreV1Interface,
-	typedbatchv1 typedbatchv1.BatchV1Interface) error {
-	if err := pkgcorev1.CheckSecretMounts(ns, typedcorev1, spec.Secrets); err != nil {
-		return err
+var ErrInvalidSpecification = errors.New("specification must be a struct pointer")
+
+func (ctx *fnCtx) CreateJobAndTrigger(w http.ResponseWriter, r *http.Request) {
+	qp := map[string][]string(r.URL.Query())
+	spec := specFromContext(ctx.c)
+	jobSpec, err := constructJobSpec(ctx.c, qp)
+	if err != nil {
+		render.Respond(w, r, &Status{"", err.Error()})
+		return
 	}
 
-	if err := pkgcorev1.CheckCMMounts(ns, typedcorev1, spec.ConfigMaps); err != nil {
-		return err
-	}
-
-	if err := pkgcorev1.CheckEnvFromResources(ns, typedcorev1, spec.EnvFromSecretorCM); err != nil {
-		return err
-	}
-	labels := getLabelsFromQP(queryParams)
 	// delete old jobs
-	cleanOldJobs(spec.Name, ns, queryParams["history"], typedbatchv1, typedcorev1)
-	delete(queryParams, "history")
-	delete(queryParams, "labels")
+	cleanOldJobs(ctx.c, spec.Name, qp)
 
-	jobName := fmt.Sprintf("%s-%s", spec.Name, uuid.New())
+	render.Respond(w, r, createJob(ctx.c, jobSpec))
+}
 
-	jobSpec := pkgbatchv1.GetJob(types.JobSpec{Name: jobName},
+func (ctx *fnCtx) CheckJobStatus(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "jobName")
+	ns := nsFromContext(ctx.c)
+
+	status, err := pkgbatchv1.Client(ctx.c).GetJobStatus(*ns, name)
+	if err != nil {
+		render.Respond(w, r, &Status{name, err})
+		return
+	}
+	render.Respond(w, r, &Status{name, status})
+}
+
+func createJob(ctx context.Context, jobSpec *batchv1.Job) *Status {
+	ns := nsFromContext(ctx)
+	job, err := pkgbatchv1.Client(ctx).CreateJob(*ns, jobSpec, true)
+	if err != nil {
+		return &Status{job.ObjectMeta.Name, err.Error()}
+	}
+	return &Status{job.ObjectMeta.Name, "Job created sucessfully!"}
+}
+
+func constructJobSpec(ctx context.Context, qp map[string][]string) (*batchv1.Job, error) {
+	ns := nsFromContext(ctx)
+	ksvcName := os.Getenv("K_SERVICE")
+	labels := getLabelsFromQP(qp)
+	originalSpec := specFromContext(ctx)
+	spec := *originalSpec
+	overrideWithQP(&spec, qp, "JS_")
+
+	//get ksvc for setting owner reference
+	ksvc, err := knative.Client(ctx).GetKService(*ns, ksvcName)
+	if err != nil {
+		logging.FromContext(ctx).Error("err getting ksvc", err)
+	}
+
+	jobSpec := pkgbatchv1.GetJob(fmt.Sprintf("%s-%s", spec.Name, uuid.New()),
 		pkgbatchv1.WithTTL(int32(100)),
-		pkgbatchv1.WithBackoffLimit(int32(1)),
+		pkgbatchv1.WithBackoffLimit(int32(0)),
 		pkgbatchv1.WithLabels(labels),
-		pkgbatchv1.WithAnnotations([]types.KV{{"sidecar.istio.io/inject", "false"}}),
-		pkgbatchv1.WithPodSpecOptions(types.PodSpec{},
+		pkgbatchv1.WithOwnerReference(ksvc),
+		pkgbatchv1.WithAnnotations([]kubernetes.KV{{"sidecar.istio.io/inject", "false"}}),
+		pkgbatchv1.WithPodSpecOptions(kubernetes.PodSpec{},
 			pkgcorev1.WithRestartPolicy("Never"),
-			pkgcorev1.WithVolumes([]types.ContainerSpec{{Secrets: spec.Secrets, ConfigMaps: spec.ConfigMaps}}),
-			pkgcorev1.WithContainerOptions(types.ContainerSpec{Image: spec.Image},
+			pkgcorev1.WithServiceAccount(spec.ServiceAccount),
+			pkgcorev1.WithVolumes([]kubernetes.ContainerSpec{{Secrets: spec.Secrets, ConfigMaps: spec.ConfigMaps}}),
+			pkgcorev1.WithContainerOptions(kubernetes.ContainerSpec{Image: spec.Image},
 				pkgcorev1.WithEnv(spec.EnvVariables),
-				pkgcorev1.WithEnv(pkgcorev1.GetEnvFromHTTPParam(queryParams)),
+				pkgcorev1.WithEnv(pkgcorev1.GetEnvFromHTTPParam(qp)),
 				pkgcorev1.WithEnvFromSecretorCM(spec.EnvFromSecretorCM),
 				pkgcorev1.WithVolumeMounts(spec.ConfigMaps, spec.Secrets),
 				pkgcorev1.WithSecurityContext(spec.User),
@@ -64,84 +100,87 @@ func CreateJob(spec types.ContainerSpec, ns string, queryParams map[string][]str
 			),
 		),
 	)
-
-	_, err := typedbatchv1.Jobs(ns).Create(&jobSpec)
-
-	return err
+	return &jobSpec, nil
 }
 
-func cleanOldJobs(jobName string, ns string, history []string,
-	typedbatchv1 typedbatchv1.BatchV1Interface, typedcorev1 typedcorev1.CoreV1Interface) {
-	currentList := getJobList(jobName, ns, typedbatchv1)
-	deleteCount := getDeleteCount(history, len(currentList))
-	for i, job := range currentList {
-		if i == deleteCount {
-			break
+//overrideWithQP overrides the spec with qp values, only replaces primitive kinds
+func overrideWithQP(spec interface{}, qp map[string][]string, qpPrefix string) error {
+	s := reflect.ValueOf(spec)
+
+	if s.Kind() != reflect.Ptr {
+		return ErrInvalidSpecification
+	}
+	s = s.Elem()
+	if s.Kind() != reflect.Struct {
+		return ErrInvalidSpecification
+	}
+	typeOfSpec := s.Type()
+
+	for i := 0; i < s.NumField(); i++ {
+		f := s.Field(i)
+		typ := f.Type()
+		ftype := typeOfSpec.Field(i)
+
+		overrideValue := fetchFromQP(qp, qpPrefix+ftype.Name)
+
+		if overrideValue == nil {
+			// no qp, so continue
+			continue
 		}
-		if err := typedbatchv1.Jobs(ns).Delete(job.ObjectMeta.Name, &metav1.DeleteOptions{}); err != nil {
-			log.Printf("Unable to delete old jobs %s", err)
-		}
-		if err := typedcorev1.Pods(ns).DeleteCollection(
-			&metav1.DeleteOptions{},
-			metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", "job-name", job.ObjectMeta.Name)},
-		); err != nil {
-			log.Printf("Unable to delete old pods %s", err)
+
+		switch typ.Kind() {
+		case reflect.String:
+			f.SetString(*overrideValue)
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			val, err := strconv.ParseInt(*overrideValue, 0, typ.Bits())
+			if err != nil {
+				return err
+			}
+
+			f.SetInt(val)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			val, err := strconv.ParseUint(*overrideValue, 0, typ.Bits())
+			if err != nil {
+				return err
+			}
+			f.SetUint(val)
+		case reflect.Bool:
+			val, err := strconv.ParseBool(*overrideValue)
+			if err != nil {
+				return err
+			}
+			f.SetBool(val)
+		case reflect.Float32, reflect.Float64:
+			val, err := strconv.ParseFloat(*overrideValue, typ.Bits())
+			if err != nil {
+				return err
+			}
+			f.SetFloat(val)
 		}
 	}
+	return nil
 }
 
-func getJobList(jobName string, ns string, typedbatchv1 typedbatchv1.BatchV1Interface) []batchv1.Job {
-	nsJobList, err := typedbatchv1.Jobs(ns).List(metav1.ListOptions{})
-	if err != nil {
-		log.Printf("Unable to retrieve old jobs %s", err)
+func fetchFromQP(qp map[string][]string, name string) *string {
+	qpValues := qp[name]
+	if len(qpValues) == 0 {
 		return nil
 	}
-	var jobList []batchv1.Job
-
-	for _, job := range nsJobList.Items {
-		if strings.Contains(job.ObjectMeta.Name, jobName) &&
-			job.Status.Active == int32(0) {
-			jobList = append(jobList, job)
-		}
-	}
-	sort.SliceStable(jobList, jobListSortFunc(jobList))
-	return jobList
+	value := qpValues[0]
+	delete(qp, name)
+	return &value
 }
 
-func jobListSortFunc(jobList []batchv1.Job) func(i int, j int) bool {
-	return func(i, j int) bool {
-		a := jobList[i]
-		b := jobList[j]
-
-		// By timestamp
-		aTime := a.ObjectMeta.CreationTimestamp
-		bTime := b.ObjectMeta.CreationTimestamp
-		return aTime.Before(&bTime)
-	}
-}
-
-func getDeleteCount(history []string, currentCount int) int {
-	var preserveCount int
-	if len(history) == 0 {
-		preserveCount = 3
-	} else {
-		preserveCount, _ = strconv.Atoi(history[0])
-	}
-	if currentCount > preserveCount {
-		return currentCount - preserveCount
-	}
-	return 0
-}
-
-func getLabelsFromQP(qp map[string][]string) []types.KV {
+func getLabelsFromQP(qp map[string][]string) []kubernetes.KV {
 	labels := qp["labels"]
 	if len(labels) == 0 {
 		return nil
 	}
-	var kvs []types.KV
+	var kvs []kubernetes.KV
 	for _, label := range strings.Split(labels[0], ",") {
 		kv := strings.Split(label, "=")
-		kvs = append(kvs, types.KV{kv[0], kv[1]})
+		kvs = append(kvs, kubernetes.KV{kv[0], kv[1]})
 	}
+	delete(qp, "labels")
 	return kvs
 }

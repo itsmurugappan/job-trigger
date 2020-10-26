@@ -1,46 +1,36 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
-	errs "github.com/itsmurugappan/http-handlers/pkg/errors"
-	"github.com/itsmurugappan/http-handlers/pkg/handlers/favicon"
+	logging "knative.dev/pkg/logging"
+
 	"github.com/itsmurugappan/job-trigger/pkg/function"
-	"github.com/itsmurugappan/kubernetes-resource-builder/pkg/kubernetes"
+	"github.com/itsmurugappan/job-trigger/pkg/routes"
 )
 
 func main() {
-	http.HandleFunc("/", jobHandler)
-	http.HandleFunc("/favicon.ico", favicon.FaviconHandler)
-	http.ListenAndServe(":8080", nil)
-}
+	done := make(chan os.Signal, 1)
+	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-func jobHandler(w http.ResponseWriter, r *http.Request) {
-	cs, err := kubernetes.GetInClusterKubeClient()
-	if err != nil {
-		errs.HandleErrors(w, err)
-		return
+	ctx := function.BuildContext()
+
+	logger := logging.FromContext(ctx)
+	defer logger.Sync()
+
+	if err := function.ValidateK8sResource(ctx); err != nil {
+		panic(err)
 	}
 
-	raw, present := os.LookupEnv("spec")
-	if !present {
-		errs.HandleErrors(w, fmt.Errorf("'spec' not provided as a env variable"))
-		return
-	}
+	r := routes.GetRoutes(ctx)
 
-	containerSpec := kubernetes.ContainerSpec{}
-	if err := json.Unmarshal([]byte(raw), &containerSpec); err != nil {
-		errs.HandleErrors(w, err)
-		return
-	}
+	go func() {
+		http.ListenAndServe(":8080", r)
+	}()
 
-	if err := function.CreateJob(containerSpec, kubernetes.GetCurrentNamespace(), map[string][]string(r.URL.Query()), cs.CoreV1(), cs.BatchV1()); err != nil {
-		errs.HandleErrors(w, err)
-		return
-	}
-
-	fmt.Fprintf(w, "Job Created\n")
+	<-done
+	logger.Info("Shutting down..")
 }
