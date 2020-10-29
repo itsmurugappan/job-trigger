@@ -2,7 +2,6 @@ package function
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,8 +23,6 @@ import (
 	pkgbatchv1 "github.com/itsmurugappan/kubernetes-resource-builder/pkg/kubernetes/batchv1"
 	pkgcorev1 "github.com/itsmurugappan/kubernetes-resource-builder/pkg/kubernetes/corev1"
 )
-
-var ErrInvalidSpecification = errors.New("specification must be a struct pointer")
 
 func (ctx *fnCtx) CreateJobAndTrigger(w http.ResponseWriter, r *http.Request) {
 	qp := map[string][]string(r.URL.Query())
@@ -106,14 +103,7 @@ func constructJobSpec(ctx context.Context, qp map[string][]string) (*batchv1.Job
 //overrideWithQP overrides the spec with qp values, only replaces primitive kinds
 func overrideWithQP(spec interface{}, qp map[string][]string, qpPrefix string) error {
 	s := reflect.ValueOf(spec)
-
-	if s.Kind() != reflect.Ptr {
-		return ErrInvalidSpecification
-	}
 	s = s.Elem()
-	if s.Kind() != reflect.Struct {
-		return ErrInvalidSpecification
-	}
 	typeOfSpec := s.Type()
 
 	for i := 0; i < s.NumField(); i++ {
